@@ -1,0 +1,6 @@
+.env
+venv/
+TTBStock_venv/
+__pycache__/
+*.log
+.idea/
