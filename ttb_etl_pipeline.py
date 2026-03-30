@@ -24,7 +24,7 @@ DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
 DB_NAME = os.getenv("DB_NAME")
 
-# จัดการรหัสผ่านที่มีเครื่องหมายพิเศษ (@, #, /)
+# จัดการรหัสผ่านที่มีเครื่องหมายพิเศษ (@, #, /) ด้วย URL Encoding
 safe_password = urllib.parse.quote_plus(DB_PASS)
 DATABASE_URL = f"postgresql://{DB_USER}:{safe_password}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 engine = create_engine(DATABASE_URL)
@@ -43,7 +43,7 @@ def run_etl():
     logging.info(f"--- Start Pipeline: {symbol} ---")
 
     try:
-        # --- CHECK: ตรวจสอบว่ามีตารางอยู่แล้วหรือไม่ ---
+        # ตรวจสอบว่ามีตารางอยู่แล้วหรือไม่
         with engine.connect() as conn:
             check_table = conn.execute(text(
                 f"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = '{table_name}')"
@@ -51,44 +51,45 @@ def run_etl():
 
         if not check_table:
             # --- MODE: INITIAL LOAD (5 ปี) ---
-            print("📦 ไม่พบตารางเดิม กำลังทำ Initial Load (ย้อนหลัง 5 ปี)...")
+            print("📦 ไม่พบตารางเดิม กำลังทำ Initial Load...")
             df = yf.Ticker(symbol).history(period="5y")
             df = df.reset_index()
+
+            # [QA Fix] ลบแถวที่ไม่มีราคา (Null) ออกก่อนบันทึก
+            df = df.dropna(subset=['Close'])
+
             df['Date'] = pd.to_datetime(df['Date']).dt.date
             df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']]
 
             df.to_sql(table_name, engine, if_exists='replace', index=False)
-            msg = f"✅ Initial Load สำเร็จ: {len(df)} แถว"
-            print(msg)
-            logging.info(msg)
+            logging.info(f"✅ Initial Load สำเร็จ: {len(df)} แถว")
 
         else:
             # --- MODE: DAILY UPDATE ---
-            print("🔄 ตารางพร้อมใช้งาน กำลังตรวจสอบข้อมูลใหม่...")
             with engine.connect() as conn:
                 last_date = conn.execute(text(f"SELECT MAX(\"Date\") FROM {table_name}")).scalar()
 
-            df_new = yf.Ticker(symbol).history(period="5d")  # ดึงเผื่อวันหยุด
+            df_new = yf.Ticker(symbol).history(period="5d")
             df_new = df_new.reset_index()
+
+            # [QA Fix] ลบแถวที่เป็น NULL/NaN ออกก่อนตรวจสอบวันล่าสุด
+            df_new = df_new.dropna(subset=['Close'])
+
             df_new['Date'] = pd.to_datetime(df_new['Date']).dt.date
             df_new = df_new[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']]
 
+            # กรองเอาเฉพาะข้อมูลที่ใหม่กว่าวันล่าสุดที่มีใน DB จริงๆ
             df_to_load = df_new[df_new['Date'] > last_date]
 
             if not df_to_load.empty:
                 df_to_load.to_sql(table_name, engine, if_exists='append', index=False)
-                msg = f"📥 อัปเดตข้อมูลใหม่สำเร็จ: {len(df_to_load)} แถว"
-                print(msg)
-                logging.info(msg)
+                logging.info(f"📥 อัปเดตข้อมูลใหม่สำเร็จ: {len(df_to_load)} แถว")
             else:
-                msg = "✅ ข้อมูลเป็นปัจจุบันอยู่แล้ว"
-                print(msg)
-                logging.info(msg)
+                logging.info("✅ ข้อมูลเป็นปัจจุบันอยู่แล้ว")
 
     except Exception as e:
-        err_msg = f"❌ Error: {str(e)}"
-        print(err_msg)
-        logging.error(err_msg, exc_info=True)
+        logging.error(f"❌ Error: {str(e)}", exc_info=True)
+        print(f"❌ เกิดข้อผิดพลาด ตรวจสอบรายละเอียดได้ที่ ttb_pipeline.log")
 
 
 if __name__ == "__main__":
