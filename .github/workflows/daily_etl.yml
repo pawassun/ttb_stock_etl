@@ -33,3 +33,4 @@ jobs:
           DB_PORT: ${{ secrets.DB_PORT }}
           DB_NAME: ${{ secrets.DB_NAME }}
         run: python ttb_etl_pipeline.py
+            cat ttb_pipeline.log
