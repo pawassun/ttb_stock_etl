@@ -3,7 +3,7 @@ name: TTB Daily ETL Pipeline
 on:
   schedule:
     # ตั้งเวลาให้รันทุกวันตอน 19:00 น. เวลาไทย (12:00 UTC)
-    - cron: '0 12 * * *'
+    - cron: '30 15 * * *'
   workflow_dispatch: # ปุ่มสำหรับกดรันเองเพื่อทดสอบ
 
 jobs:
