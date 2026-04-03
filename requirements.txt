@@ -1,8 +1,8 @@
-﻿beautifulsoup4
+beautifulsoup4
 certifi
 cffi
 charset-normalizer
-curl_cffi
+curl-cffi
 frozendict
 greenlet
 idna
@@ -10,6 +10,7 @@ multitasking
 numpy
 pandas
 peewee
+pip
 platformdirs
 protobuf
 psycopg2-binary
@@ -18,10 +19,11 @@ python-dateutil
 python-dotenv
 pytz
 requests
+setuptools
 six
 soupsieve
-SQLAlchemy
-typing_extensions
+sqlalchemy
+typing-extensions
 tzdata
 urllib3
 uv
