@@ -3,113 +3,161 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import urllib.parse
-from datetime import datetime, timedelta
+import logging
+from datetime import datetime, date, timedelta
+from typing import Optional, Union, List, Tuple
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, Engine
 
+# --- 1. Initial Setup & Config ---
 load_dotenv()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- Setup DB ---
-DB_PASS_SAFE = urllib.parse.quote_plus(os.getenv('DB_PASS'))
-DATABASE_URL = f"postgresql://{os.getenv('DB_USER')}:{DB_PASS_SAFE}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
-engine = create_engine(DATABASE_URL)
+def get_engine() -> Engine:
+    """สร้าง Connection Engine โดยจัดการรหัสผ่านที่มี @"""
+    user = os.getenv('DB_USER')
+    password = urllib.parse.quote_plus(os.getenv('DB_PASS', ''))
+    host = os.getenv('DB_HOST')
+    port = os.getenv('DB_PORT')
+    dbname = os.getenv('DB_NAME')
+    url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+    return create_engine(url)
 
-def log_to_supabase(event, status, message):
-    """ฟังก์ชันพิมพ์ Log ลงตาราง process_logs """
-    with engine.begin() as conn:
-        conn.execute(text("INSERT INTO process_logs (event_type, status, message) VALUES (:e, :s, :m)"),
-                     {"e": event, "s": status, "m": message})
+engine = get_engine()
 
-def get_last_date(table_name):
-    """หาว่าข้อมูลล่าสุดในตารางคือวันที่เท่าไหร่"""
+# --- 2. Logging Function (Discord Style) ---
+def log_to_supabase(event: str, status: str, message: str) -> None:
+    """บันทึกประวัติการทำงานลงตาราง process_logs เพื่อตรวจสอบย้อนหลัง"""
+    query = text("INSERT INTO process_logs (event_type, status, message) VALUES (:e, :s, :m)")
+    try:
+        with engine.begin() as conn:
+            conn.execute(query, {"e": event, "s": status, "m": message})
+    except Exception as e:
+        logging.error(f"Failed to write log: {e}")
+
+# --- 3. Incremental Helper ---
+def get_last_date(table_name: str) -> Optional[date]:
+    """หาว่าข้อมูลล่าสุดใน Database คือวันที่เท่าไหร่"""
+    query = text(f"SELECT MAX(date) FROM {table_name}")
     try:
         with engine.connect() as conn:
-            result = conn.execute(text(f"SELECT MAX(date) FROM {table_name}")).fetchone()
-            return result[0]
-    except:
+            result = conn.execute(query).fetchone()
+            return result[0] if result and result[0] else None
+    except Exception as e:
+        logging.warning(f"Table {table_name} might be empty or not exist: {e}")
         return None
 
-# --- Indicator Functions (ฉบับสมบูรณ์) ---
-def apply_indicators(df):
-    """คำนวณ Indicators ทั้งหมดจากโค้ดที่ Sun ให้มา"""
-    d = df.copy()
-    # Trend
+# --- 4. Technical Indicator Engine ---
+def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """คำนวณ Indicators ทั้งหมด (Trend, Momentum, Volatility, Volume)"""
+    d: pd.DataFrame = df.copy()
+    d.columns = [c.lower() for c in d.columns] # ทำเป็นตัวเล็กทั้งหมดเพื่อให้ตรงกับ DB
+    
+    # [TREND] EMA 20
     d['ema_20'] = d['close'].ewm(span=20, adjust=False).mean()
-    # MACD
-    fast_ema = d['close'].ewm(span=12, adjust=False).mean()
-    slow_ema = d['close'].ewm(span=26, adjust=False).mean()
+    
+    # [TREND] MACD
+    fast_ema: pd.Series = d['close'].ewm(span=12, adjust=False).mean()
+    slow_ema: pd.Series = d['close'].ewm(span=26, adjust=False).mean()
     d['macd_line'] = fast_ema - slow_ema
     d['macd_signal'] = d['macd_line'].ewm(span=9, adjust=False).mean()
     d['macd_hist'] = d['macd_line'] - d['macd_signal']
-    # Momentum
-    delta = d['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    
+    # [MOMENTUM] RSI 14
+    delta: pd.Series = d['close'].diff()
+    gain: pd.Series = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss: pd.Series = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     d['rsi_14'] = 100 - (100 / (1 + (gain / loss)))
-    # Stochastic
-    low_min = d['low'].rolling(14).min()
-    high_max = d['high'].rolling(14).max()
+    
+    # [MOMENTUM] Stochastic (K, D)
+    low_min: pd.Series = d['low'].rolling(window=14).min()
+    high_max: pd.Series = d['high'].rolling(window=14).max()
     d['stoch_k'] = 100 * ((d['close'] - low_min) / (high_max - low_min))
-    d['stoch_d'] = d['stoch_k'].rolling(3).mean()
-    # Volatility (Bollinger & ATR)
-    mid = d['close'].rolling(20).mean()
-    std = d['close'].rolling(20).std()
+    d['stoch_d'] = d['stoch_k'].rolling(window=3).mean()
+    
+    # [VOLATILITY] Bollinger Bands
+    mid: pd.Series = d['close'].rolling(window=20).mean()
+    std: pd.Series = d['close'].rolling(window=20).std()
     d['bb_upper'] = mid + (std * 2)
     d['bb_lower'] = mid - (std * 2)
-    tr = pd.concat([d['high']-d['low'], abs(d['high']-d['close'].shift()), abs(d['low']-d['close'].shift())], axis=1).max(axis=1)
-    d['atr_14'] = tr.rolling(14).mean()
-    # Volume
-    tp = (d['high'] + d['low'] + d['close']) / 3
-    mf = tp * d['volume']
-    pos_mf = mf.where(tp > tp.shift(1), 0).rolling(14).sum()
-    neg_mf = mf.where(tp < tp.shift(1), 0).rolling(14).sum()
+    
+    # [VOLATILITY] ATR 14
+    tr: pd.Series = pd.concat([
+        d['high'] - d['low'], 
+        abs(d['high'] - d['close'].shift()), 
+        abs(d['low'] - d['close'].shift())
+    ], axis=1).max(axis=1)
+    d['atr_14'] = tr.rolling(window=14).mean()
+    
+    # [VOLUME] MFI 14
+    tp: pd.Series = (d['high'] + d['low'] + d['close']) / 3
+    mf: pd.Series = tp * d['volume']
+    pos_mf: pd.Series = mf.where(tp > tp.shift(1), 0).rolling(14).sum()
+    neg_mf: pd.Series = mf.where(tp < tp.shift(1), 0).rolling(14).sum()
     d['mfi_14'] = 100 - (100 / (1 + (pos_mf / neg_mf)))
     
     return d.dropna()
 
-def run_pipeline():
-    last_date = get_last_date("ttb_historical_data")
-    ticker = yf.Ticker("TTB.BK")
+# --- 5. Main Pipeline Operation ---
+def run_pipeline() -> None:
+    """รันกระบวนการดึงข้อมูลและคำนวณแบบ Incremental"""
+    symbol: str = "TTB.BK"
+    raw_table: str = "ttb_historical_data"
+    feature_table: str = "ttb_technical_indicators"
     
-    # 1. Fetch Incremental Data
-    if last_date:
-        fetch_from = (last_date + timedelta(days=1)).strftime('%Y-%m-%d')
-        new_data = ticker.history(start=fetch_from)
-        msg = f"Fetching since {fetch_from}"
+    # ขั้นตอน 1: เช็ควันล่าสุดเพื่อทำ Incremental Load
+    last_date_in_db: Optional[date] = get_last_date(raw_table)
+    ticker = yf.Ticker(symbol)
+    
+    if last_date_in_db:
+        start_date: str = (last_date_in_db + timedelta(days=1)).strftime('%Y-%m-%d')
+        new_raw: pd.DataFrame = ticker.history(start=start_date)
+        fetch_msg: str = f"Incremental fetch since {start_date}"
     else:
-        new_data = ticker.history(period="max")
-        msg = "Initial full fetch"
+        new_raw: pd.DataFrame = ticker.history(period="max")
+        fetch_msg: str = "Initial full history fetch"
 
-    if new_data.empty:
-        log_to_supabase("FETCH_RAW", "SKIPPED", "No new data found")
-        return
+    # บันทึก Raw Data ถ้ามีของใหม่
+    if not new_raw.empty:
+        new_raw.index = new_raw.index.date
+        new_raw.index.name = 'date'
+        new_raw.columns = [c.lower() for c in new_raw.columns]
+        
+        # กรองเอาเฉพาะคอลัมน์หลัก
+        raw_to_db = new_raw[['open', 'high', 'low', 'close', 'volume']]
+        raw_to_db.to_sql(raw_table, engine, if_exists='append', index=True)
+        log_to_supabase("FETCH_RAW", "SUCCESS", f"{fetch_msg}: Added {len(raw_to_db)} rows.")
+    else:
+        log_to_supabase("FETCH_RAW", "SKIPPED", "No new data available from Yahoo Finance.")
 
-    # บันทึก Raw Data
-    new_data.index = new_data.index.date
-    new_data.columns = [c.lower() for c in new_data.columns]
-    new_data.index.name = 'date'
-    new_data[['open', 'high', 'low', 'close', 'volume']].to_sql("ttb_historical_data", engine, if_exists='append', index=True)
-    log_to_supabase("FETCH_RAW", "SUCCESS", f"Added {len(new_data)} rows. {msg}")
-
-    # 2. Calculate Indicators (ดึงข้อมูลเก่ามาช่วยคำนวณเพื่อให้ค่าแม่นยำ)
-    all_data = ticker.history(period="1y") # ดึง 1 ปีมาคำนวณเพื่อให้เส้น EMA/RSI นิ่ง
-    all_data.columns = [c.lower() for c in all_data.columns]
-    all_data.index = all_data.index.date
-    all_data.index.name = 'date'
+    # ขั้นตอน 2: คำนวณ Indicators (ดึงย้อนหลัง 1 ปีเพื่อให้เลขแม่นยำ)
+    all_recent_data: pd.DataFrame = ticker.history(period="1y")
+    all_recent_data.index = all_recent_data.index.date
+    all_recent_data.index.name = 'date'
     
-    indicators_df = apply_indicators(all_data)
+    indicators_df: pd.DataFrame = apply_indicators(all_recent_data)
     
-    # บันทึกลง technical_indicators (ใช้ท่า Upsert)
-    with engine.begin() as conn:
-        indicators_df.to_sql("temp_indicators", conn, if_exists='replace')
-        upsert_query = """
-            INSERT INTO ttb_technical_indicators (date, ema_20, macd_line, macd_signal, macd_hist, rsi_14, stoch_k, stoch_d, bb_upper, bb_lower, atr_14, mfi_14)
-            SELECT date, ema_20, macd_line, macd_signal, macd_hist, rsi_14, stoch_k, stoch_d, bb_upper, bb_lower, atr_14, mfi_14 FROM temp_indicators
-            ON CONFLICT (date) DO UPDATE SET 
-                ema_20=EXCLUDED.ema_20, rsi_14=EXCLUDED.rsi_14, macd_line=EXCLUDED.macd_line;
-        """
-        conn.execute(text(upsert_query))
-    log_to_supabase("CALC_INDICATORS", "SUCCESS", "Indicators updated for latest period")
+    # บันทึก Indicators แบบ Upsert
+    try:
+        with engine.begin() as conn:
+            indicators_df.to_sql("temp_indicators", conn, if_exists='replace', index=True)
+            
+            cols = ", ".join([f'"{c}"' for c in indicators_df.columns])
+            update_stmt = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in indicators_df.columns])
+            
+            upsert_query = f"""
+                INSERT INTO {feature_table} ("date", {cols})
+                SELECT "date", {cols} FROM temp_indicators
+                ON CONFLICT ("date") DO UPDATE SET 
+                    {update_stmt},
+                    updated_at = CURRENT_TIMESTAMP;
+            """
+            conn.execute(text(upsert_query))
+            conn.execute(text("DROP TABLE IF EXISTS temp_indicators;"))
+            
+        log_to_supabase("CALC_FEATURES", "SUCCESS", f"Indicators updated up to {indicators_df.index[-1]}")
+    except Exception as e:
+        log_to_supabase("CALC_FEATURES", "FAILED", f"Error during upsert: {str(e)}")
 
 if __name__ == "__main__":
     run_pipeline()
