@@ -15,7 +15,7 @@ DATABASE_URL = f"postgresql://{os.getenv('DB_USER')}:{DB_PASS_SAFE}@{os.getenv('
 engine = create_engine(DATABASE_URL)
 
 def log_to_supabase(event, status, message):
-    """ฟังก์ชันพิมพ์ Log ลงตาราง process_logs เหมือน Discord Logs"""
+    """ฟังก์ชันพิมพ์ Log ลงตาราง process_logs """
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO process_logs (event_type, status, message) VALUES (:e, :s, :m)"),
                      {"e": event, "s": status, "m": message})
