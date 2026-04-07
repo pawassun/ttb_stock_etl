@@ -49,7 +49,7 @@ def get_last_date(table_name: str) -> Optional[date]:
 
 # --- 4. Technical Indicator Engine ---
 def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """คำนวณ Indicators ทั้งหมดจากโค้ดที่ Sun กำหนด"""
+    """คำนวณ Indicators ทั้งหมดจากที่โค้ดกำหนด"""
     d: pd.DataFrame = df.copy()
     d.columns = [c.lower() for c in d.columns]
     
