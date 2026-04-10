@@ -5,11 +5,11 @@ import numpy as np
 import urllib.parse
 import logging
 from datetime import datetime, date, timedelta
-from typing import Optional, List
+from typing import Optional
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, Engine
 
-# --- Setup ---
+# --- Initial Setup ---
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -48,20 +48,19 @@ def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
     windows = [10, 20, 30, 40, 50, 60]
     
     for w in windows:
-        # Trend & Momentum
         d[f'ema_{w}'] = d['close'].ewm(span=w, adjust=False).mean()
         
         delta = d['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=w).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=w).mean()
-        d[f'rsi_{w}'] = 100 - (100 / (1 + (gain / loss)))
+        # ป้องกันการหารด้วยศูนย์ (Division by zero)
+        d[f'rsi_{w}'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
         
         low_min = d['low'].rolling(window=w).min()
         high_max = d['high'].rolling(window=w).max()
-        d[f'stoch_k_{w}'] = 100 * ((d['close'] - low_min) / (high_max - low_min))
+        d[f'stoch_k_{w}'] = 100 * ((d['close'] - low_min) / (high_max - low_min + 1e-9))
         d[f'stoch_d_{w}'] = d[f'stoch_k_{w}'].rolling(window=3).mean()
         
-        # Volatility
         mid = d['close'].rolling(window=w).mean()
         std = d['close'].rolling(window=w).std()
         d[f'bb_upper_{w}'] = mid + (std * 2)
@@ -70,14 +69,12 @@ def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
         tr = pd.concat([d['high']-d['low'], abs(d['high']-d['close'].shift()), abs(d['low']-d['close'].shift())], axis=1).max(axis=1)
         d[f'atr_{w}'] = tr.rolling(window=w).mean()
         
-        # Volume
         tp = (d['high'] + d['low'] + d['close']) / 3
         mf = tp * d['volume']
         pos_mf = mf.where(tp > tp.shift(1), 0).rolling(w).sum()
         neg_mf = mf.where(tp < tp.shift(1), 0).rolling(w).sum()
-        d[f'mfi_{w}'] = 100 - (100 / (1 + (pos_mf / neg_mf)))
+        d[f'mfi_{w}'] = 100 - (100 / (1 + (pos_mf / (neg_mf + 1e-9))))
 
-    # MACD (Standard 12,26,9)
     fast_ema = d['close'].ewm(span=12, adjust=False).mean()
     slow_ema = d['close'].ewm(span=26, adjust=False).mean()
     d['macd_line'] = fast_ema - slow_ema
@@ -93,10 +90,17 @@ def run_pipeline() -> None:
     feature_table = "ttb_technical_indicators"
     windows = [10, 20, 30, 40, 50, 60]
     
-    # 1. Raw Data Fetch
+    # 1. Raw Data Fetch (Incremental)
     last_date_db = get_last_date(raw_table)
     ticker = yf.Ticker(symbol)
-    new_raw = ticker.history(start=(last_date_db + timedelta(days=1)) if last_date_db else "2021-01-01")
+    
+    # Check ป้องกันการดึงวันพรุ่งนี้ (Error: Start date after end date)
+    if last_date_db and (last_date_db + timedelta(days=1)) > date.today():
+        log_to_supabase("FETCH_RAW", "SKIPPED", f"Data already up to date ({last_date_db}).")
+        new_raw = pd.DataFrame()
+    else:
+        start_date = (last_date_db + timedelta(days=1)) if last_date_db else "2021-01-01"
+        new_raw = ticker.history(start=start_date)
 
     if not new_raw.empty:
         new_raw.index = new_raw.index.date
@@ -105,13 +109,14 @@ def run_pipeline() -> None:
         new_raw[['open', 'high', 'low', 'close', 'volume']].to_sql(raw_table, engine, if_exists='append', index=True)
         log_to_supabase("FETCH_RAW", "SUCCESS", f"Added {len(new_raw)} rows.")
     
-    # 2. Indicators Update
+    # 2. Indicators Update (Upsert)
+    # ดึงย้อนหลัง 2 ปี เพื่อให้ EMA 60 วันนิ่งที่สุด
     all_data = ticker.history(period="2y") 
     all_data.index = all_data.index.date
     all_data.index.name = 'date'
     indicators_df = apply_indicators(all_data)
     
-    # Auto-select target columns
+    # เลือกเฉพาะคอลัมน์ที่ต้องการ
     target_cols = ['macd_line', 'macd_signal', 'macd_hist']
     for w in windows:
         target_cols += [f'ema_{w}', f'rsi_{w}', f'stoch_k_{w}', f'stoch_d_{w}', 
