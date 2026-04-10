@@ -2,32 +2,27 @@ name: TTB Daily Stock ETL
 
 on:
   schedule:
-    # รันทุกวันจันทร์ - ศุกร์ เวลา 17:00 น. (เวลาไทยคือเที่ยงคืน 00:00)
-    # 17:00 UTC = 00:00 ICT (Bangkok)
-    - cron: '30 3 * * 1-5'  # 10:30 ไทย
-    - cron: '0 6 * * 1-5'   # 13:00 ไทย
-    - cron: '0 10 * * 1-5'  # 17:00 ไทย
+    # 03:30 UTC = 10:30 ไทย (ตลาดเปิด)
+    - cron: '30 3 * * 1-5'
+    # 06:00 UTC = 13:00 ไทย (พักเที่ยง)
+    - cron: '0 6 * * 1-5'
+    # 10:00 UTC = 17:00 ไทย (ตลาดปิด)
+    - cron: '0 10 * * 1-5'
     
-  workflow_dispatch: # ปุ่มกดรันเองแบบ Manual สำหรับทดสอบ
+  workflow_dispatch: 
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
       - name: Run ETL Pipeline
         env:
           DB_USER: ${{ secrets.DB_USER }}
@@ -36,5 +31,3 @@ jobs:
           DB_PORT: ${{ secrets.DB_PORT }}
           DB_NAME: ${{ secrets.DB_NAME }}
         run: python ttb_etl_pipeline.py
-
-      # หมายเหตุ: ลบส่วน cat log ออกแล้ว เพราะ logging จะโชว์ในหน้า Actions ให้เลย
