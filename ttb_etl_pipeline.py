@@ -53,7 +53,6 @@ def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
         delta = d['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=w).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=w).mean()
-        # ป้องกันการหารด้วยศูนย์ (Division by zero)
         d[f'rsi_{w}'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
         
         low_min = d['low'].rolling(window=w).min()
@@ -94,7 +93,7 @@ def run_pipeline() -> None:
     last_date_db = get_last_date(raw_table)
     ticker = yf.Ticker(symbol)
     
-    # Check ป้องกันการดึงวันพรุ่งนี้ (Error: Start date after end date)
+    
     if last_date_db and (last_date_db + timedelta(days=1)) > date.today():
         log_to_supabase("FETCH_RAW", "SKIPPED", f"Data already up to date ({last_date_db}).")
         new_raw = pd.DataFrame()
@@ -110,13 +109,11 @@ def run_pipeline() -> None:
         log_to_supabase("FETCH_RAW", "SUCCESS", f"Added {len(new_raw)} rows.")
     
     # 2. Indicators Update (Upsert)
-    # ดึงย้อนหลัง 2 ปี เพื่อให้ EMA 60 วันนิ่งที่สุด
     all_data = ticker.history(period="2y") 
     all_data.index = all_data.index.date
     all_data.index.name = 'date'
     indicators_df = apply_indicators(all_data)
     
-    # เลือกเฉพาะคอลัมน์ที่ต้องการ
     target_cols = ['macd_line', 'macd_signal', 'macd_hist']
     for w in windows:
         target_cols += [f'ema_{w}', f'rsi_{w}', f'stoch_k_{w}', f'stoch_d_{w}', 
