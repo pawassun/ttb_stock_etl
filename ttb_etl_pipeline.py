@@ -5,16 +5,15 @@ import numpy as np
 import urllib.parse
 import logging
 from datetime import datetime, date, timedelta
-from typing import Optional, Union, List, Tuple
+from typing import Optional, List
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, Engine
 
-# --- 1. Initial Setup & Config ---
+# --- Setup ---
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def get_engine() -> Engine:
-    """สร้าง Connection Engine โดยจัดการรหัสผ่านที่มีตัวพิเศษ"""
     user = os.getenv('DB_USER')
     password = urllib.parse.quote_plus(os.getenv('DB_PASS', ''))
     host = os.getenv('DB_HOST')
@@ -25,9 +24,7 @@ def get_engine() -> Engine:
 
 engine = get_engine()
 
-# --- 2. Logging Function (Discord Style) ---
 def log_to_supabase(event: str, status: str, message: str) -> None:
-    """บันทึกประวัติการทำงานลงตาราง process_logs"""
     query = text("INSERT INTO process_logs (event_type, status, message) VALUES (:e, :s, :m)")
     try:
         with engine.begin() as conn:
@@ -35,130 +32,108 @@ def log_to_supabase(event: str, status: str, message: str) -> None:
     except Exception as e:
         logging.error(f"Failed to write log: {e}")
 
-# --- 3. Incremental Helper ---
 def get_last_date(table_name: str) -> Optional[date]:
-    """หาว่าข้อมูลล่าสุดใน Database คือวันที่เท่าไหร่"""
     query = text(f"SELECT MAX(date) FROM {table_name}")
     try:
         with engine.connect() as conn:
             result = conn.execute(query).fetchone()
             return result[0] if result and result[0] else None
-    except Exception as e:
-        logging.warning(f"Table {table_name} check failed: {e}")
+    except Exception:
         return None
 
-# --- 4. Technical Indicator Engine ---
+# --- Indicator Engine (Multi-Window) ---
 def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """คำนวณ Indicators ทั้งหมดจากที่โค้ดกำหนด"""
     d: pd.DataFrame = df.copy()
     d.columns = [c.lower() for c in d.columns]
+    windows = [10, 20, 30, 40, 50, 60]
     
-    # [TREND] EMA 20
-    d['ema_20'] = d['close'].ewm(span=20, adjust=False).mean()
-    
-    # [TREND] MACD
-    fast_ema: pd.Series = d['close'].ewm(span=12, adjust=False).mean()
-    slow_ema: pd.Series = d['close'].ewm(span=26, adjust=False).mean()
+    for w in windows:
+        # Trend & Momentum
+        d[f'ema_{w}'] = d['close'].ewm(span=w, adjust=False).mean()
+        
+        delta = d['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=w).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=w).mean()
+        d[f'rsi_{w}'] = 100 - (100 / (1 + (gain / loss)))
+        
+        low_min = d['low'].rolling(window=w).min()
+        high_max = d['high'].rolling(window=w).max()
+        d[f'stoch_k_{w}'] = 100 * ((d['close'] - low_min) / (high_max - low_min))
+        d[f'stoch_d_{w}'] = d[f'stoch_k_{w}'].rolling(window=3).mean()
+        
+        # Volatility
+        mid = d['close'].rolling(window=w).mean()
+        std = d['close'].rolling(window=w).std()
+        d[f'bb_upper_{w}'] = mid + (std * 2)
+        d[f'bb_lower_{w}'] = mid - (std * 2)
+        
+        tr = pd.concat([d['high']-d['low'], abs(d['high']-d['close'].shift()), abs(d['low']-d['close'].shift())], axis=1).max(axis=1)
+        d[f'atr_{w}'] = tr.rolling(window=w).mean()
+        
+        # Volume
+        tp = (d['high'] + d['low'] + d['close']) / 3
+        mf = tp * d['volume']
+        pos_mf = mf.where(tp > tp.shift(1), 0).rolling(w).sum()
+        neg_mf = mf.where(tp < tp.shift(1), 0).rolling(w).sum()
+        d[f'mfi_{w}'] = 100 - (100 / (1 + (pos_mf / neg_mf)))
+
+    # MACD (Standard 12,26,9)
+    fast_ema = d['close'].ewm(span=12, adjust=False).mean()
+    slow_ema = d['close'].ewm(span=26, adjust=False).mean()
     d['macd_line'] = fast_ema - slow_ema
     d['macd_signal'] = d['macd_line'].ewm(span=9, adjust=False).mean()
     d['macd_hist'] = d['macd_line'] - d['macd_signal']
     
-    # [MOMENTUM] RSI 14
-    delta: pd.Series = d['close'].diff()
-    gain: pd.Series = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss: pd.Series = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    d['rsi_14'] = 100 - (100 / (1 + (gain / loss)))
-    
-    # [MOMENTUM] Stochastic
-    low_min: pd.Series = d['low'].rolling(window=14).min()
-    high_max: pd.Series = d['high'].rolling(window=14).max()
-    d['stoch_k'] = 100 * ((d['close'] - low_min) / (high_max - low_min))
-    d['stoch_d'] = d['stoch_k'].rolling(window=3).mean()
-    
-    # [VOLATILITY] Bollinger Bands
-    mid: pd.Series = d['close'].rolling(window=20).mean()
-    std: pd.Series = d['close'].rolling(window=20).std()
-    d['bb_upper'] = mid + (std * 2)
-    d['bb_lower'] = mid - (std * 2)
-    
-    # [VOLATILITY] ATR 14
-    tr: pd.Series = pd.concat([
-        d['high'] - d['low'], 
-        abs(d['high'] - d['close'].shift()), 
-        abs(d['low'] - d['close'].shift())
-    ], axis=1).max(axis=1)
-    d['atr_14'] = tr.rolling(window=14).mean()
-    
-    # [VOLUME] MFI 14
-    tp: pd.Series = (d['high'] + d['low'] + d['close']) / 3
-    mf: pd.Series = tp * d['volume']
-    pos_mf: pd.Series = mf.where(tp > tp.shift(1), 0).rolling(14).sum()
-    neg_mf: pd.Series = mf.where(tp < tp.shift(1), 0).rolling(14).sum()
-    d['mfi_14'] = 100 - (100 / (1 + (pos_mf / neg_mf)))
-    
     return d.dropna()
 
-# --- 5. Main Pipeline Operation ---
+# --- Main Pipeline ---
 def run_pipeline() -> None:
-    symbol: str = "TTB.BK"
-    raw_table: str = "ttb_historical_data"
-    feature_table: str = "ttb_technical_indicators"
+    symbol = "TTB.BK"
+    raw_table = "ttb_historical_data"
+    feature_table = "ttb_technical_indicators"
+    windows = [10, 20, 30, 40, 50, 60]
     
-    # --- Part 1: Raw Data (Incremental) ---
-    last_date_in_db: Optional[date] = get_last_date(raw_table)
+    # 1. Raw Data Fetch
+    last_date_db = get_last_date(raw_table)
     ticker = yf.Ticker(symbol)
-    
-    if last_date_in_db:
-        start_date: str = (last_date_in_db + timedelta(days=1)).strftime('%Y-%m-%d')
-        new_raw: pd.DataFrame = ticker.history(start=start_date)
-    else:
-        new_raw: pd.DataFrame = ticker.history(period="max")
+    new_raw = ticker.history(start=(last_date_db + timedelta(days=1)) if last_date_db else "2021-01-01")
 
     if not new_raw.empty:
         new_raw.index = new_raw.index.date
         new_raw.index.name = 'date'
         new_raw.columns = [c.lower() for c in new_raw.columns]
-        raw_to_db = new_raw[['open', 'high', 'low', 'close', 'volume']]
-        raw_to_db.to_sql(raw_table, engine, if_exists='append', index=True)
-        log_to_supabase("FETCH_RAW", "SUCCESS", f"Added {len(raw_to_db)} rows to {raw_table}.")
-    else:
-        log_to_supabase("FETCH_RAW", "SKIPPED", "No new raw data found.")
+        new_raw[['open', 'high', 'low', 'close', 'volume']].to_sql(raw_table, engine, if_exists='append', index=True)
+        log_to_supabase("FETCH_RAW", "SUCCESS", f"Added {len(new_raw)} rows.")
+    
+    # 2. Indicators Update
+    all_data = ticker.history(period="2y") 
+    all_data.index = all_data.index.date
+    all_data.index.name = 'date'
+    indicators_df = apply_indicators(all_data)
+    
+    # Auto-select target columns
+    target_cols = ['macd_line', 'macd_signal', 'macd_hist']
+    for w in windows:
+        target_cols += [f'ema_{w}', f'rsi_{w}', f'stoch_k_{w}', f'stoch_d_{w}', 
+                        f'bb_upper_{w}', f'bb_lower_{w}', f'atr_{w}', f'mfi_{w}']
+    
+    final_df = indicators_df[target_cols]
 
-    # --- Part 2: Technical Indicators (Upsert) ---
-    all_recent_data: pd.DataFrame = ticker.history(period="1y") # ใช้ 1 ปีเพื่อให้เลขแม่นยำ
-    all_recent_data.index = all_recent_data.index.date
-    all_recent_data.index.name = 'date'
-    
-    indicators_df: pd.DataFrame = apply_indicators(all_recent_data)
-    
-    # **สำคัญ: เลือกเฉพาะคอลัมน์ที่มีในตาราง Indicators เท่านั้น**
-    target_columns = [
-        'ema_20', 'macd_line', 'macd_signal', 'macd_hist', 
-        'rsi_14', 'stoch_k', 'stoch_d', 'bb_upper', 
-        'bb_lower', 'atr_14', 'mfi_14'
-    ]
-    final_features_df = indicators_df[target_columns]
-    
     try:
         with engine.begin() as conn:
-            final_features_df.to_sql("temp_indicators", conn, if_exists='replace', index=True)
-            
-            cols = ", ".join([f'"{c}"' for c in final_features_df.columns])
-            update_stmt = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in final_features_df.columns])
-            
+            final_df.to_sql("temp_indicators", conn, if_exists='replace', index=True)
+            cols = ", ".join([f'"{c}"' for c in final_df.columns])
+            update_stmt = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in final_df.columns])
             upsert_query = f"""
                 INSERT INTO {feature_table} ("date", {cols})
                 SELECT "date", {cols} FROM temp_indicators
-                ON CONFLICT ("date") DO UPDATE SET 
-                    {update_stmt},
-                    updated_at = CURRENT_TIMESTAMP;
+                ON CONFLICT ("date") DO UPDATE SET {update_stmt}, updated_at = CURRENT_TIMESTAMP;
             """
             conn.execute(text(upsert_query))
             conn.execute(text("DROP TABLE IF EXISTS temp_indicators;"))
-            
-        log_to_supabase("CALC_FEATURES", "SUCCESS", f"Indicators updated in {feature_table}.")
+        log_to_supabase("CALC_FEATURES", "SUCCESS", "Multi-window features updated.")
     except Exception as e:
-        log_to_supabase("CALC_FEATURES", "FAILED", f"Error: {str(e)}")
+        log_to_supabase("CALC_FEATURES", "FAILED", str(e))
 
 if __name__ == "__main__":
     run_pipeline()
