@@ -1,58 +1,43 @@
-📈 TTB Stock ETL Pipeline (Supabase + GitHub Actions)
-โปรเจกต์สำหรับดึงข้อมูลหุ้น TMBThanachart Bank (TTB) อัตโนมัติ เพื่อนำไปจัดเก็บใน Cloud Database (Supabase) สำหรับใช้ในระบบ Line Chatbot และงาน Data Science
+--> TTB End-to-End ETL & Feature Engineering Pipeline
+Automated Financial Data Pipeline with Multi-Window Technical Indicators
+
+โปรเจกต์ระบบดึงข้อมูลและวิเคราะห์ทางเทคนิคของหุ้น TMBThanachart Bank (TTB.BK) แบบอัตโนมัติ โดยเน้นความถูกต้องของข้อมูล (Incremental Load) และการทำ Feature Engineering เพื่อรองรับงาน Data Science และการสร้าง Trading Bot
+
 🛠️ Tech Stack
-Language: Python 3.10+
-
-Data Source: Yahoo Finance (yfinance)
-
+Language: Python 3.11+
+Data Source: Yahoo Finance API (yfinance)
 Storage: PostgreSQL (Supabase)
+Automation: GitHub Actions (CI/CD)
 
-Automation: GitHub Actions
-
-Library หลัก: Pandas, SQLAlchemy, Psycopg2-binary, Dotenv
-
-📂 โครงสร้างโปรเจกต์
-ttb_etl_pipeline.py: โค้ดหลักสำหรับทำ ETL (Extract, Transform, Load) ทั้งแบบ Initial และ Daily Update
-
+--> Project Structure
+ttb_etl_pipeline.py: โค้ดหลักที่ควบคุม Logic ทั้งหมด (Incremental Fetch + Feature Calculation)
 requirements.txt: รายการ Library ที่จำเป็นต้องใช้
+.github/workflows/main.yml: ไฟล์ตั้งค่าการรันอัตโนมัติ 3 ช่วงเวลาต่อวัน (ตลาดเปิด/เที่ยง/ปิด)
 
-.github/workflows/daily_etl.yml: (กำลังจะสร้าง) ไฟล์ตั้งค่าการรันอัตโนมัติบน GitHub
+--> Pipeline Logic (Advanced Features)
+*Smart Incremental Load: ตรวจสอบวันที่ล่าสุดใน Database ก่อนดึงข้อมูลใหม่เสมอ เพื่อป้องกันการดึงซ้ำและประหยัด Bandwidth
+*Multi-Window Feature Engineering: คำนวณ Indicators ทั้งหมด 8 ประเภท ใน 6 ช่วงเวลา (10, 20, 30, 40, 50, 60 วัน) รวมกว่า 39 Features
+- Trend: EMA
+- Momentum: RSI, Stochastic, MACD
+- Volatility: Bollinger Bands, ATR
+- Volume: Money Flow Index (MFI)
+*Data Quality Guard: ระบบป้องกัน Division by Zero และการตรวจสอบวันที่ล้ำหน้า (Forward-date check)
+*Audit Logging: บันทึกประวัติการทำงานลงตาราง process_logs ใน Supabase เพื่อการ Monitoring ระยะยาว
 
-🚀 ระบบการทำงาน (Pipeline Logic)
-Extract: ดึงข้อมูลหุ้น TTB.BK จาก Yahoo Finance API
+--> การตั้งค่าและใช้งาน (Local Development)
+1. Setup Environment: ติดตั้ง library ทั้งหมดที่ต้องใช้ผ่านไฟล์ requirements.txt (pip install -r requirements.txt
+2. Configuration: กำหนดค่าต่างๆใหม่โดยการ สร้างไฟล์ .env และระบุค่าเชื่อมต่อ Supabase (DB_USER = your_user / DB_PASS = your_password / DB_HOST = your_host / DB_PORT = your_port / DB_NAME = postgres)
+3. Run Pipeline: รันไฟล์ python ttb_etl_pipeline.py
 
-Transform:
+--> SQL Schema
+เพื่อให้ระบบทำงานได้สมบูรณ์ จำเป็นต้องสร้าง 3 ตารางหลักใน Supabase:
+1. ttb_historical_data: สำหรับเก็บราคา Open, High, Low, Close, Volume
+2. ttb_technical_indicators: สำหรับเก็บค่า Features ที่คำนวณได้
+3. process_logs: สำหรับเก็บสถานะการทำงาน (SUCCESS/FAILED/SKIPPED)
 
-ทำ Data Cleaning เบื้องต้น
+--> Automation Schedule
+ระบบรันอัตโนมัติผ่าน GitHub Actions ในวันทำการ (จันทร์-ศุกร์):
+10:30 น. (ตลาดเปิด)
+13:00 น. (พักเที่ยง)
+17:00 น. (ตลาดปิด)
 
-จัดการ Timezone ให้เป็น Asia/Bangkok
-
-ตรวจสอบข้อมูลล่าสุดใน Database เพื่อป้องกันข้อมูลซ้ำ (Data Quality Check)
-
-Load:
-
-หากยังไม่มีตาราง จะทำ Initial Load ย้อนหลัง 5 ปี
-
-หากมีตารางแล้ว จะทำ Append ข้อมูลใหม่รายวัน
-
-⚙️ วิธีการใช้งาน (สำหรับ Local Development)
-Clone Repository นี้ลงเครื่อง
-
-สร้าง Virtual Environment และติดตั้ง Library:
-
-Bash
-pip install -r requirements.txt
-สร้างไฟล์ .env และใส่ค่าการเชื่อมต่อ Supabase:
-
-ข้อมูลโค้ด
-DB_USER=your_user
-DB_PASS=your_password
-DB_HOST=your_host
-DB_PORT=5432
-DB_NAME=postgres
-รัน Pipeline:
-
-Bash
-python ttb_etl_pipeline.py
-📝 Logging & Monitoring
-ระบบจะบันทึก Log การทำงานไว้ในไฟล์ ttb_pipeline.log เพื่อใช้ในการตรวจสอบ Error และความถูกต้องของข้อมูล (QA)
