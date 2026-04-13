@@ -89,11 +89,11 @@ def run_pipeline() -> None:
     feature_table = "ttb_technical_indicators"
     windows = [10, 20, 30, 40, 50, 60]
     
-    # 1. Raw Data Fetch (Incremental)
+    # --- 1. Raw Data Fetch (Incremental with Upsert) ---
     last_date_db = get_last_date(raw_table)
     ticker = yf.Ticker(symbol)
     
-    
+    # Check ป้องกันการดึงวันล่วงหน้า (Error: Start date after end date)
     if last_date_db and (last_date_db + timedelta(days=1)) > date.today():
         log_to_supabase("FETCH_RAW", "SKIPPED", f"Data already up to date ({last_date_db}).")
         new_raw = pd.DataFrame()
@@ -105,10 +105,31 @@ def run_pipeline() -> None:
         new_raw.index = new_raw.index.date
         new_raw.index.name = 'date'
         new_raw.columns = [c.lower() for c in new_raw.columns]
-        new_raw[['open', 'high', 'low', 'close', 'volume']].to_sql(raw_table, engine, if_exists='append', index=True)
-        log_to_supabase("FETCH_RAW", "SUCCESS", f"Added {len(new_raw)} rows.")
+        
+        # เปลี่ยนจาก .to_sql('append') เป็นการทำ Upsert ผ่าน Temp Table เพื่อป้องกัน Unique Violation
+        try:
+            with engine.begin() as conn:
+                # สร้างตารางชั่วคราวสำหรับ Raw Data
+                new_raw[['open', 'high', 'low', 'close', 'volume']].to_sql("temp_raw", conn, if_exists='replace', index=True)
+                
+                upsert_raw_query = f"""
+                    INSERT INTO {raw_table} (date, open, high, low, close, volume)
+                    SELECT date, open, high, low, close, volume FROM temp_raw
+                    ON CONFLICT (date) DO UPDATE SET 
+                        open = EXCLUDED.open,
+                        high = EXCLUDED.high,
+                        low = EXCLUDED.low,
+                        close = EXCLUDED.close,
+                        volume = EXCLUDED.volume;
+                """
+                conn.execute(text(upsert_raw_query))
+                conn.execute(text("DROP TABLE IF EXISTS temp_raw;"))
+            log_to_supabase("FETCH_RAW", "SUCCESS", f"Upserted {len(new_raw)} rows to {raw_table}.")
+        except Exception as e:
+            log_to_supabase("FETCH_RAW", "FAILED", str(e))
+            logging.error(f"Raw data upsert failed: {e}")
     
-    # 2. Indicators Update (Upsert)
+    # --- 2. Indicators Update (Upsert) ---
     all_data = ticker.history(period="2y") 
     all_data.index = all_data.index.date
     all_data.index.name = 'date'
