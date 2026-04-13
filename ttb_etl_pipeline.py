@@ -105,11 +105,10 @@ def run_pipeline() -> None:
         new_raw.index = new_raw.index.date
         new_raw.index.name = 'date'
         new_raw.columns = [c.lower() for c in new_raw.columns]
-        
-        # เปลี่ยนจาก .to_sql('append') เป็นการทำ Upsert ผ่าน Temp Table เพื่อป้องกัน Unique Violation
+                
         try:
             with engine.begin() as conn:
-                # สร้างตารางชั่วคราวสำหรับ Raw Data
+                
                 new_raw[['open', 'high', 'low', 'close', 'volume']].to_sql("temp_raw", conn, if_exists='replace', index=True)
                 
                 upsert_raw_query = f"""
